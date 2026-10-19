@@ -27,7 +27,12 @@
   "variable": [
     {
       "key": "base_url",
-      "value": "http://172.11.1.10"
+      "value": "https://caught-purpose-complete-parks.trycloudflare.com"
+    },
+    {
+      "key": "lan_url",
+      "value": "http://172.11.1.15",
+      "description": "Company-network address; copy into base_url to use it instead"
     },
     {
       "key": "api_key",
@@ -117,7 +122,7 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/events?wait=true&until=technician&timeout=300",
+              "raw": "{{base_url}}/api/events?wait=true&until=technician&timeout=90",
               "host": [
                 "{{base_url}}"
               ],
@@ -136,7 +141,7 @@
                 },
                 {
                   "key": "timeout",
-                  "value": "300"
+                  "value": "90"
                 }
               ]
             },
@@ -468,6 +473,50 @@
               ]
             },
             "description": "202 reminder_call_placed · 200 not_needed (closed / reassigned / status recorded / alarm cleared) · 409 not acknowledged yet · 404 unknown ticket.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"assignment_id\": \"{{assignment_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Follow-up + WAIT for reminder call result",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/tickets/{{ticket_id}}/followup?wait=true&timeout=90",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "tickets",
+                "{{ticket_id}}",
+                "followup"
+              ],
+              "query": [
+                {
+                  "key": "wait",
+                  "value": "true"
+                },
+                {
+                  "key": "timeout",
+                  "value": "90"
+                }
+              ]
+            },
+            "description": "Places the reminder call (if still needed) and waits until it ends: reminder_result = reminder_delivered (answered) | not_picked_up | busy_or_declined | ..., answered = true/false. HTTP 200 when the call ended, 202 + pending if timeout passed first. not_needed / 409 / 404 return at once.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"assignment_id\": \"{{assignment_id}}\"\n}",
@@ -926,7 +975,7 @@
             "description": "Earlier API, kept for compatibility. Plays the language menu; 1 = accept, 9 = reject.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"alert_id\": \"ALM-80\",\n  \"ticket_id\": \"{{legacy_ticket_id}}\",\n  \"phone_number\": \"{{technician_mobile}}\",\n  \"site_details\": \"Site 2040, Olaya Branch, Riyadh\",\n  \"callback_url\": \"{{callback_url}}\"\n}",
+              "raw": "{\n  \"alert_id\": \"ALM-80\",\n  \"ticket_id\": \"{{legacy_ticket_id}}\",\n  \"phone_number\": \"{{technician_mobile}}\",\n  \"technician_name\": \"Ahmed Khan\",\n  \"site_details\": \"Site 2040, Olaya Branch, Riyadh\",\n  \"technician_language\": \"en\",\n  \"team_leader_number\": \"{{team_leader_mobile}}\",\n  \"team_leader_name\": \"Imran\",\n  \"team_leader_language\": \"ur\",\n  \"manager_number\": \"{{manager_mobile}}\",\n  \"manager_name\": \"Sara\",\n  \"manager_language\": \"ar\",\n  \"callback_url\": \"{{callback_url}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -946,7 +995,7 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/call?wait=true&timeout=300",
+              "raw": "{{base_url}}/api/call?wait=true&timeout=90",
               "host": [
                 "{{base_url}}"
               ],
@@ -961,14 +1010,14 @@
                 },
                 {
                   "key": "timeout",
-                  "value": "300"
+                  "value": "90"
                 }
               ]
             },
             "description": "Waits for the technician: call_result + visit_status (accepted / rejected / no_response) in the same response.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"alert_id\": \"ALM-80\",\n  \"ticket_id\": \"{{legacy_ticket_id}}\",\n  \"phone_number\": \"{{technician_mobile}}\",\n  \"site_details\": \"Site 2040, Olaya Branch, Riyadh\",\n  \"callback_url\": \"{{callback_url}}\"\n}",
+              "raw": "{\n  \"alert_id\": \"ALM-80\",\n  \"ticket_id\": \"{{legacy_ticket_id}}\",\n  \"phone_number\": \"{{technician_mobile}}\",\n  \"technician_name\": \"Ahmed Khan\",\n  \"site_details\": \"Site 2040, Olaya Branch, Riyadh\",\n  \"technician_language\": \"en\",\n  \"team_leader_number\": \"{{team_leader_mobile}}\",\n  \"team_leader_name\": \"Imran\",\n  \"team_leader_language\": \"ur\",\n  \"manager_number\": \"{{manager_mobile}}\",\n  \"manager_name\": \"Sara\",\n  \"manager_language\": \"ar\",\n  \"callback_url\": \"{{callback_url}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"

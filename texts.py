@@ -8,8 +8,8 @@ from xml.sax.saxutils import escape
 from config import CFG
 
 TEMPLATES = {  # purpose -> (template id, version) recorded on every call
-    "technician": ("uc1_technician_ack", "v1"),
-    "escalation": ("uc1_escalation", "v1"),
+    "technician": ("uc1_technician_ack", "v2"),
+    "escalation": ("uc1_escalation", "v3"),
     "reminder": ("uc1_followup_reminder", "v1"),
 }
 
@@ -18,12 +18,15 @@ LANGS = {
         "name": "English", "voice": "Polly.Aditi", "language": "en-IN",
         "menu": "For English, press {n}.",
         "alarm": " Alarm {a}.",
-        "technician": "Hello. This is the Automation Edge helpdesk. Ticket {t} has been assigned to you, "
+        "greet": "Hello.", "greet_name": "Hello {rname}.",
+        "technician": "{greet} This is the Automation Edge helpdesk. Ticket {t} has been assigned to you, "
                       "at site {s}.{alarm} Press {ack} to acknowledge this ticket. Press {rej} to reject it.",
-        "escalation": "Hello. This is the Automation Edge helpdesk escalation. Ticket {t}, at site {s}.{alarm} "
-                      "The technician {name} {reason}. Please follow up in NexTask.",
-        "escalation_confirm": "Press {ack} to confirm that you will follow up.",
-        "confirmed": "Thank you. Your confirmation has been recorded. Goodbye.",
+        "escalation": "{greet} This is the Automation Edge helpdesk escalation. Ticket {t}, at site {s}.{alarm} "
+                      "The technician {name} {reason}.",
+        "escalation_question": "Should we assign this alert to another technician? "
+                               "Press {ack} for yes. Press {rej} for no.",
+        "reassign_yes": "Thank you. This alert will be assigned to another technician. Goodbye.",
+        "reassign_no": "Thank you. This alert will not be assigned to another technician. Goodbye.",
         "reason_rejected": "has rejected the assignment",
         "reason_no_ack": "has not acknowledged the assignment after {n} calls",
         "reminder": "Reminder from the Automation Edge helpdesk. Ticket {t}, at site {s}, is still waiting for "
@@ -38,12 +41,14 @@ LANGS = {
         "name": "Arabic", "voice": "Polly.Zeina", "language": "arb",
         "menu": "للعربية، اضغط {n}.",
         "alarm": " التنبيه {a}.",
-        "technician": "مرحبا. هذا مكتب المساعدة من أوتوميشن إيدج. تم تعيين التذكرة {t} لك، في الموقع {s}.{alarm} "
+        "greet": "مرحبا.", "greet_name": "مرحبا {rname}.",
+        "technician": "{greet} هذا مكتب المساعدة من أوتوميشن إيدج. تم تعيين التذكرة {t} لك، في الموقع {s}.{alarm} "
                       "اضغط {ack} لتأكيد الاستلام. اضغط {rej} للرفض.",
-        "escalation": "مرحبا. هذا تصعيد من مكتب المساعدة. التذكرة {t}، في الموقع {s}.{alarm} "
-                      "الفني {name} {reason}. يرجى المتابعة في نكست تاسك.",
-        "escalation_confirm": "اضغط {ack} لتأكيد أنك ستتابع.",
-        "confirmed": "شكرا لك. تم تسجيل تأكيدك. مع السلامة.",
+        "escalation": "{greet} هذا تصعيد من مكتب المساعدة. التذكرة {t}، في الموقع {s}.{alarm} "
+                      "الفني {name} {reason}.",
+        "escalation_question": "هل نُسند هذا التنبيه إلى فني آخر؟ اضغط {ack} للموافقة. اضغط {rej} للرفض.",
+        "reassign_yes": "شكرا لك. سيتم إسناد هذا التنبيه إلى فني آخر. مع السلامة.",
+        "reassign_no": "شكرا لك. لن يتم إسناد هذا التنبيه إلى فني آخر. مع السلامة.",
         "reason_rejected": "رفض المهمة",
         "reason_no_ack": "لم يؤكد استلام المهمة بعد {n} مكالمات",
         "reminder": "تذكير من مكتب المساعدة. التذكرة {t} في الموقع {s} ما زالت بانتظار تحديث حالتك. "
@@ -59,12 +64,15 @@ LANGS = {
         "name": "Urdu", "voice": "Polly.Aditi", "language": "hi-IN",
         "menu": "उर्दू के लिए {n} दबाइए।",
         "alarm": " अलार्म {a}।",
-        "technician": "अस्सलाम-ओ-अलैकुम। यह ऑटोमेशन एज हेल्पडेस्क है। टिकट {t} आपको दिया गया है, साइट {s}।{alarm} "
+        "greet": "अस्सलाम-ओ-अलैकुम।", "greet_name": "अस्सलाम-ओ-अलैकुम {rname}।",
+        "technician": "{greet} यह ऑटोमेशन एज हेल्पडेस्क है। टिकट {t} आपको दिया गया है, साइट {s}।{alarm} "
                       "टिकट क़ुबूल करने के लिए {ack} दबाइए। मुस्तरद करने के लिए {rej} दबाइए।",
-        "escalation": "अस्सलाम-ओ-अलैकुम। यह हेल्पडेस्क एस्केलेशन है। टिकट {t}, साइट {s}।{alarm} "
-                      "टेक्नीशियन {name} {reason}। बराए मेहरबानी नेक्स्ट टास्क में फ़ॉलो-अप कीजिए।",
-        "escalation_confirm": "फ़ॉलो-अप की तस्दीक़ के लिए {ack} दबाइए।",
-        "confirmed": "शुक्रिया। आपकी तस्दीक़ दर्ज कर ली गई है। ख़ुदा हाफ़िज़।",
+        "escalation": "{greet} यह हेल्पडेस्क एस्केलेशन है। टिकट {t}, साइट {s}।{alarm} "
+                      "टेक्नीशियन {name} {reason}।",
+        "escalation_question": "क्या यह अलर्ट किसी दूसरे टेक्नीशियन को दे दिया जाए? "
+                               "हाँ के लिए {ack} दबाइए। नहीं के लिए {rej} दबाइए।",
+        "reassign_yes": "शुक्रिया। यह अलर्ट दूसरे टेक्नीशियन को दे दिया जाएगा। ख़ुदा हाफ़िज़।",
+        "reassign_no": "शुक्रिया। यह अलर्ट दूसरे टेक्नीशियन को नहीं दिया जाएगा। ख़ुदा हाफ़िज़।",
         "reason_rejected": "ने असाइनमेंट मुस्तरद कर दिया है",
         "reason_no_ack": "ने {n} कॉल के बाद भी असाइनमेंट क़ुबूल नहीं किया",
         "reminder": "हेल्पडेस्क की याद-दहानी। टिकट {t}, साइट {s}, पर आपका स्टेटस अपडेट अभी बाक़ी है। "
@@ -79,12 +87,15 @@ LANGS = {
         "name": "Hindi", "voice": "Polly.Aditi", "language": "hi-IN",
         "menu": "हिंदी के लिए {n} दबाएं।",
         "alarm": " अलार्म {a}।",
-        "technician": "नमस्ते। यह ऑटोमेशन एज हेल्पडेस्क है। टिकट {t} आपको सौंपा गया है, साइट {s}।{alarm} "
+        "greet": "नमस्ते।", "greet_name": "नमस्ते {rname}।",
+        "technician": "{greet} यह ऑटोमेशन एज हेल्पडेस्क है। टिकट {t} आपको सौंपा गया है, साइट {s}।{alarm} "
                       "टिकट स्वीकार करने के लिए {ack} दबाएं। अस्वीकार करने के लिए {rej} दबाएं।",
-        "escalation": "नमस्ते। यह हेल्पडेस्क एस्केलेशन है। टिकट {t}, साइट {s}।{alarm} "
-                      "तकनीशियन {name} {reason}। कृपया नेक्स्ट टास्क में फ़ॉलो-अप करें।",
-        "escalation_confirm": "फ़ॉलो-अप की पुष्टि के लिए {ack} दबाएं।",
-        "confirmed": "धन्यवाद। आपकी पुष्टि दर्ज कर ली गई है। अलविदा।",
+        "escalation": "{greet} यह हेल्पडेस्क एस्केलेशन है। टिकट {t}, साइट {s}।{alarm} "
+                      "तकनीशियन {name} {reason}।",
+        "escalation_question": "क्या यह अलर्ट किसी दूसरे तकनीशियन को सौंप दिया जाए? "
+                               "हाँ के लिए {ack} दबाएं। नहीं के लिए {rej} दबाएं।",
+        "reassign_yes": "धन्यवाद। यह अलर्ट दूसरे तकनीशियन को सौंप दिया जाएगा। अलविदा।",
+        "reassign_no": "धन्यवाद। यह अलर्ट दूसरे तकनीशियन को नहीं सौंपा जाएगा। अलविदा।",
         "reason_rejected": "ने असाइनमेंट अस्वीकार कर दिया है",
         "reason_no_ack": "ने {n} कॉल के बाद भी असाइनमेंट स्वीकार नहीं किया",
         "reminder": "हेल्पडेस्क रिमाइंडर। टिकट {t}, साइट {s}, पर आपका स्टेटस अपडेट बाकी है। "
@@ -125,8 +136,15 @@ def site_words(ticket):
     return spell(number) if number else (name or "unknown")
 
 
+def greeting(lang, name):
+    """'Hello Ahmed.' when the recipient's name is known, else 'Hello.'"""
+    L = LANGS[lang]
+    return L["greet_name"].format(rname=name) if name else L["greet"]
+
+
 def voice_text(lang, key, ticket=None, **kw):
     L = LANGS[lang]
+    kw.setdefault("greet", L["greet"])
     if ticket is not None:
         kw.setdefault("t", spell(ticket["ticket_id"]))
         kw.setdefault("s", site_words(ticket))

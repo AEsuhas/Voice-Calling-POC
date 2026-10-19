@@ -133,6 +133,16 @@ def calls_of(tid, wf=None):
                    (tid, wf) if wf else (tid,))
 
 
+def wait_until_new_reminder(tid, count, timeout=6):
+    end = time.time() + timeout
+    while time.time() < end:
+        rows = store.q("SELECT call_sid FROM calls WHERE ticket_id=? AND workflow='uc1_reminder'", (tid,))
+        if len(rows) >= count and rows[-1]["call_sid"]:
+            return True
+        time.sleep(0.05)
+    raise AssertionError(f"{tid}: reminder call #{count} never placed")
+
+
 def ok(name):
     PASSED.append(name)
     print(f"PASS {len(PASSED):2d}: {name}", flush=True)
@@ -162,7 +172,7 @@ state("INC1", "ACKNOWLEDGED")
 v = view("INC1")
 c = v["calls"][0]
 assert c["language"] == "ar" and c["language_source"] == "nextask" and c["dtmf"] == "5", c
-assert c["template"] == "uc1_technician_ack" and c["template_version"] == "v1" and c["ack_result"] == "valid", c
+assert c["template"] == "uc1_technician_ack" and c["template_version"] == "v2" and c["ack_result"] == "valid", c
 assert v["call_workflow"]["acknowledged_via"] == "voice" and v["followup"]["state"] == "AWAITING_TRIGGER", v
 ok("ack: language from event (ar, no menu), dynamic digit 5, reject 9 announced, template/version audited")
 
@@ -223,21 +233,39 @@ assign("INC6", lang="en")
 answer(wait_call("INC6", "technician", 1), "9")
 tl = wait_call("INC6", "team_leader", 1, "uc1_escalation")
 xml = answer(tl, "5")
-assert "हेल्पडेस्क एस्केलेशन" in xml and "मुस्तरद" in xml and "5 दबाइए" in xml, xml
+assert "हेल्पडेस्क एस्केलेशन" in xml and "मुस्तरद" in xml and "दूसरे टेक्नीशियन" in xml, xml
+assert "हाँ के लिए 5 दबाइए" in xml and "नहीं के लिए 9 दबाइए" in xml and "नेक्स्ट टास्क" not in xml, xml
 state("INC6", "TL_REACHED")
 esc = view("INC6")["call_workflow"]["escalation"]
-assert esc["reason"] == "rejected" and esc["team_leader_reached"] and esc["team_leader_confirmed"], esc
+assert esc["reason"] == "rejected" and esc["team_leader_reached"], esc
+assert esc["team_leader_decision"] == "assign_to_another_technician" == esc["reassign"], esc
 assert not calls_of("INC6", "uc1_escalation")[1:], "manager must not be called"
-ok("reject (9) -> escalation: TL called in Urdu, pressed key -> TL_REACHED + confirmed, no manager call")
+ok("reject (9) -> TL called in Urdu, asked to reassign, pressed 5 (yes) -> TL_REACHED, no manager call")
 
 # TL answers but presses nothing -> still reached (answered counts)
 assign("INC7")
 answer(wait_call("INC7", "technician", 1), "9")
-answer(wait_call("INC7", "team_leader", 1, "uc1_escalation"))
-state("INC7", "TL_REACHED")
+answer(wait_call("INC7", "team_leader", 1, "uc1_escalation"))       # picks up, presses nothing
+answer(wait_call("INC7", "manager", 1, "uc1_escalation"), "9")         # so the manager is called
+state("INC7", "MANAGER_REACHED")
 esc = view("INC7")["call_workflow"]["escalation"]
-assert esc["team_leader_reached"] is True and esc["team_leader_confirmed"] is False, esc
-ok("TL answers without pressing a key -> reached, confirmed=false")
+assert esc["team_leader_reached"] is True and esc["team_leader_decision"] is None, esc
+assert esc["manager_decision"] == "do_not_reassign" == esc["reassign"], esc
+assign("INC7C")
+answer(wait_call("INC7C", "technician", 1), "9")
+answer(wait_call("INC7C", "team_leader", 1, "uc1_escalation"))
+answer(wait_call("INC7C", "manager", 1, "uc1_escalation"))
+answer(wait_call("INC7C", "manager", 2, "uc1_escalation"))
+state("INC7C", "ESCALATION_UNRESOLVED")
+assign("INC7B")
+answer(wait_call("INC7B", "technician", 1), "9")
+answer(wait_call("INC7B", "team_leader", 1, "uc1_escalation"), "9")
+state("INC7B", "TL_REACHED")
+esc = view("INC7B")["call_workflow"]["escalation"]
+assert esc["team_leader_decision"] == "do_not_reassign" == esc["reassign"], esc
+assert not [c for c in calls_of("INC7B") if c["role"] == "manager"]
+ok("TL picks up without a key -> manager called (9 -> do_not_reassign); no key anywhere -> UNRESOLVED; "
+   "TL presses 9 -> do_not_reassign, manager not called")
 
 # 2 technician misses -> TL no answer -> manager attempt 1 busy -> attempt 2 answered
 assign("INC8")
@@ -245,12 +273,15 @@ no_answer(wait_call("INC8", "technician", 1))
 no_answer(wait_call("INC8", "technician", 2))
 no_answer(wait_call("INC8", "team_leader", 1, "uc1_escalation"))
 no_answer(wait_call("INC8", "manager", 1, "uc1_escalation"), "busy")
-answer(wait_call("INC8", "manager", 2, "uc1_escalation"), "5")
+xml = answer(wait_call("INC8", "manager", 2, "uc1_escalation"), "5")
+assert "Should we assign this alert to another technician? Press 5 for yes. Press 9 for no." in xml, xml
+assert "follow up in NexTask" not in xml, xml
 state("INC8", "MANAGER_REACHED")
 v = view("INC8")
 esc = v["call_workflow"]["escalation"]
 assert esc["reason"] == "no_acknowledgement" and esc["technician_calls"] == 2, esc
-assert esc["team_leader_reached"] is False and esc["manager_reached"] and esc["manager_confirmed"], esc
+assert esc["team_leader_reached"] is False and esc["manager_reached"], esc
+assert esc["manager_decision"] == "assign_to_another_technician" == esc["reassign"], esc
 assert "Manager: call 1 line was busy" in v["call_workflow"]["response_summary"], v["call_workflow"]
 ok("no ack x2 -> TL not answered -> manager busy -> manager attempt 2 answered -> MANAGER_REACHED")
 
@@ -449,6 +480,27 @@ assert http("GET", "/api/call/LEG1")[1]["visit_status"] == "accepted"
 assert http("POST", "/api/call", {"ticket_id": "X"})[0] == 400
 ok("legacy /api/call: menu, ack 1, visit_status accepted, 409 duplicate, 400 missing fields")
 
+# /api/call with a language per person
+code, res = http("POST", "/api/call", {"alert_id": "A", "ticket_id": "LANG1", "phone_number": "+911111111111",
+                                       "site_details": "Site 3", "technician_language": "ar",
+                                       "team_leader_number": "+912222222222", "team_leader_language": "ur",
+                                       "manager_number": "+913333333333", "manager_language": "en"})
+assert code == 202, res
+rec = res["recipients"]
+assert (rec["technician"]["language"], rec["team_leader"]["language"], rec["manager"]["language"]) == ("ar", "ur", "en")
+xml = answer(wait_call("LANG1", "technician", 1), "9")
+assert "Polly.Zeina" in xml and "/twilio/lang" not in xml, xml
+xml = twilio(f"/twilio/voice?cid={wait_call('LANG1', 'team_leader', 1, 'uc1_escalation')}", {})
+assert 'language="hi-IN"' in xml and "दूसरे टेक्नीशियन" in xml, xml
+code, res = http("POST", "/api/call", {"alert_id": "A", "ticket_id": "LANG2", "phone_number": "+911111111111",
+                                       "site_details": "x", "language": "ar", "manager_number": "+913333333333",
+                                       "manager_language": "en"})
+assert res["recipients"]["technician"]["language"] == "ar" and res["recipients"]["manager"]["language"] == "en"
+assert http("POST", "/api/call", {"alert_id": "A", "ticket_id": "LANG3", "phone_number": "+911111111111",
+                                  "site_details": "x", "manager_number": "+913333333333",
+                                  "manager_language": "fr"})[0] == 400
+ok("/api/call per-person language: technician ar, TL ur, manager en; language = default; bad value -> 400")
+
 # ?wait=true: one request returns the technician's answer
 def in_background(fn, *a, **kw):
     box = {}
@@ -481,8 +533,8 @@ ev2 = dict(ev, event_id="WAIT-3", ticket={"ticket_id": "WAIT3", "assignment_id":
 th, box = in_background(http, "POST", "/api/events?wait=true&timeout=1", ev2)
 th.join(10)
 code, res = box["res"]
-assert code == 202 and res["call_result"] == "pending" and res["timed_out"] is True, res
-ok("wait timeout -> 202 call_result=pending (call keeps running)")
+assert code == 200 and res["call_result"] == "pending" and res["timed_out"] is True, res
+ok("wait timeout -> call_result=pending, timed_out=true (call keeps running)")
 
 no_answer(wait_call("WAIT3", "technician", 1))
 ev4 = dict(ev, event_id="WAIT-4", ticket={"ticket_id": "WAIT4", "assignment_id": "W4"},
@@ -491,11 +543,99 @@ th, box = in_background(http, "POST", "/api/events?wait=true&until=final&timeout
 answer(wait_call("WAIT4", "technician", 1), "9")
 time.sleep(0.5)
 assert th.is_alive(), "until=final must keep waiting during escalation"
-answer(wait_call("WAIT4", "team_leader", 1, "uc1_escalation"))
+answer(wait_call("WAIT4", "team_leader", 1, "uc1_escalation"), "1")
 th.join(25)
 code, res = box["res"]
 assert code == 200 and res["call_result"] == "rejected" and res["ticket"]["call_workflow"]["state"] == "TL_REACHED", res
 ok("wait until=final -> returns after escalation finished (TL_REACHED)")
+
+# Follow-up ?wait=true: answered / not answered / not needed
+ev5 = dict(ev, event_id="WAIT-5", ticket={"ticket_id": "WAIT5", "assignment_id": "W5"})
+http("POST", "/api/events", ev5)
+answer(wait_call("WAIT5", "technician", 1), "1")
+state("WAIT5", "ACKNOWLEDGED")
+th, box = in_background(http, "POST", "/api/tickets/WAIT5/followup?wait=true&timeout=20", {"assignment_id": "W5"})
+answer(wait_call("WAIT5", "technician", 1, "uc1_reminder"))
+th.join(25)
+code, res = box["res"]
+assert code == 200 and res["result"] == "reminder_call_placed" and res["reminder_result"] == "reminder_delivered", res
+assert res["answered"] is True and res["followup"]["state"] == "REMINDER_CALLED" and res["call"]["call_sid"], res
+th, box = in_background(http, "POST", "/api/tickets/WAIT5/followup?wait=true&timeout=20", {})
+wait_until_new_reminder("WAIT5", 2)
+no_answer(store.q("SELECT id FROM calls WHERE ticket_id='WAIT5' AND workflow='uc1_reminder' ORDER BY id DESC",
+                  one=True)["id"])
+th.join(25)
+code, res = box["res"]
+assert code == 200 and res["reminder_result"] == "not_picked_up" and res["answered"] is False, res
+event("OPERATIONAL_STATUS", "WAIT5", ticket={"operational_status": "Started"})
+code, res = http("POST", "/api/tickets/WAIT5/followup?wait=true&timeout=5", {})
+assert code == 200 and res["result"] == "not_needed" and "Started" in res["reason"], res
+ok("follow-up ?wait=true -> reminder answered / not picked up returned in response; not_needed returns at once")
+
+# Names: technician greeted by name, TL greeted by name and told the technician's name
+th, box = in_background(http, "POST", "/api/call?wait=true&until=final&timeout=20",
+                        {"alert_id": "A9", "ticket_id": "NAME1", "phone_number": "+911111111111",
+                         "site_details": "Site 9", "language": "en", "technician_name": "Ahmed Khan",
+                         "team_leader_number": "+912222222222", "team_leader_name": "Imran"})
+xml = answer(wait_call("NAME1", "technician", 1), "9")
+assert "Hello Ahmed Khan. This is the Automation Edge helpdesk." in xml, xml
+xml = answer(wait_call("NAME1", "team_leader", 1, "uc1_escalation"), "1")
+assert "Hello Imran. This is the Automation Edge helpdesk escalation." in xml, xml
+assert "The technician Ahmed Khan has rejected the assignment." in xml, xml
+th.join(25)
+code, res = box["res"]
+assert code == 200 and res["call_workflow"]["state"] == "TL_REACHED", res
+assert res["recipients"]["team_leader"]["name"] == "Imran", res["recipients"]
+ok("names: 'Hello Ahmed Khan', TL hears 'Hello Imran' + 'The technician Ahmed Khan has rejected'")
+
+# Menu choice remembered: technician call 2 and manager call 2 do not ask the language again
+assign("MENU1", lang="ask", mgr="+913333333333")
+r = store.get_ticket("MENU1")["recipients"]
+store.update_ticket("MENU1", recipients=dict(r, team_leader={}, manager=dict(r["manager"], language="ask")))
+c1 = wait_call("MENU1", "technician", 1)
+twilio(f"/twilio/voice?cid={c1}", {})
+twilio(f"/twilio/lang?cid={c1}&r=0", {"Digits": "2"})
+twilio(f"/twilio/voice?cid={c1}&r=1", {})
+twilio(f"/twilio/call-status?cid={c1}", {"CallStatus": "completed"})
+c2 = wait_call("MENU1", "technician", 2)
+xml = twilio(f"/twilio/voice?cid={c2}", {})
+assert "/twilio/lang" not in xml and "Polly.Zeina" in xml, "technician call 2 must reuse Arabic"
+assert store.get_call(c2)["language_source"] == "menu_earlier_call"
+twilio(f"/twilio/voice?cid={c2}&r=1", {})
+twilio(f"/twilio/call-status?cid={c2}", {"CallStatus": "completed"})
+m1 = wait_call("MENU1", "manager", 1, "uc1_escalation")
+assert "/twilio/lang" in twilio(f"/twilio/voice?cid={m1}", {}), "manager's first call asks"
+twilio(f"/twilio/lang?cid={m1}&r=0", {"Digits": "3"})
+no_answer(m1)
+m2 = wait_call("MENU1", "manager", 2, "uc1_escalation")
+xml = twilio(f"/twilio/voice?cid={m2}", {})
+assert "/twilio/lang" not in xml and 'language="hi-IN"' in xml, "manager call 2 must reuse Urdu"
+ok("menu choice remembered: technician call 2 and manager call 2 skip the language menu")
+
+# Keep-alive: a long wait streams spaces first, then valid JSON
+app.KEEPALIVE_SEC = 0.2
+ev6 = dict(ev, event_id="WAIT-6", ticket={"ticket_id": "WAIT6", "assignment_id": "W6"})
+raw_box = {}
+
+
+def raw_post():
+    req = urllib.request.Request(BASE + "/api/events?wait=true&timeout=5", method="POST",
+                                 data=json.dumps(ev6).encode(),
+                                 headers={"X-API-Key": "test-key", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req) as r:
+        raw_box["status"], raw_box["body"] = r.status, r.read().decode()
+
+
+th = threading.Thread(target=raw_post, daemon=True)
+th.start()
+cid6 = wait_call("WAIT6", "technician", 1)
+time.sleep(1.2)
+answer(cid6, "1")
+th.join(10)
+app.KEEPALIVE_SEC = 10
+assert raw_box["status"] == 200 and raw_box["body"].startswith("  "), raw_box["body"][:20]
+assert json.loads(raw_box["body"])["call_result"] == "accepted"
+ok("long wait streams keep-alive spaces, then valid JSON (survives Cloudflare's 100 s limit)")
 
 # Twilio signature validation
 CFG.update(dry_run=False, base_url="https://example.trycloudflare.com", token="secret-token")

@@ -40,8 +40,9 @@ NOT_PICKED_UP = {"not_picked_up", "busy_or_declined", "call_failed", "canceled",
 RESPONSE_TEXT = {
     "acknowledged": "acknowledged the assignment",
     "rejected": "rejected the assignment",
-    "reached": "answered the escalation call (no key pressed)",
-    "confirmed": "answered and confirmed follow-up",
+    "reached": "picked up but did not press 1 or 9 (counted as no response)",
+    "reassign_yes": "answered: yes, assign the alert to another technician",
+    "reassign_no": "answered: no, do not assign the alert to another technician",
     "reminder_delivered": "answered the reminder call",
     "not_picked_up": "did not pick up the call",
     "busy_or_declined": "line was busy or the call was declined",
@@ -466,6 +467,12 @@ def _place_call(t, role, attempt, workflow):
     tid = t["ticket_id"]
     rec = t["recipients"].get(role) or {}
     lang, source = texts.resolve_language(rec.get("language"))
+    if lang is None:  # menu: reuse what this person already chose on an earlier call of this ticket
+        earlier = q("SELECT language FROM calls WHERE ticket_id=? AND role=? AND to_number=? "
+                    "AND language_source='menu' AND language IS NOT NULL ORDER BY id DESC LIMIT 1",
+                    (tid, role, rec.get("mobile")), one=True)
+        if earlier:
+            lang, source = earlier["language"], "menu_earlier_call"
     template, version = texts.TEMPLATES[WORKFLOW_PURPOSE[workflow]]
     cid = q("INSERT INTO calls (ticket_id, assignment_id, workflow, role, attempt_no, recipient_name, to_number, "
             "language, language_source, template, template_version, status, created_at) "
@@ -512,7 +519,8 @@ def twiml_voice(cid, retry):
     t = get_ticket(c["ticket_id"])
     purpose = WORKFLOW_PURPOSE[c["workflow"]]
     if purpose == "technician":
-        prompt = texts.voice_text(lang, "technician", t, ack=t["ack_digit"], rej=t["reject_digit"])
+        prompt = texts.voice_text(lang, "technician", t, ack=t["ack_digit"], rej=t["reject_digit"],
+                                  greet=texts.greeting(lang, c["recipient_name"]))
         gather = (f'<Gather input="dtmf" numDigits="1" timeout="8" method="POST" '
                   f'action="/twilio/gather?cid={cid}&amp;r={retry}">{texts.say(lang, prompt)}</Gather>')
         if retry == 0:
@@ -520,13 +528,14 @@ def twiml_voice(cid, retry):
         update_call(cid, outcome=c["outcome"] or "no_input")
         return _twiml(gather + texts.say(lang, texts.LANGS[lang]["noinput"]) + "<Hangup/>")
     if purpose == "escalation":
-        # Answering counts as reached; pressing the key also records a confirmation
+        # Answering counts as reached; the reassign question records a yes/no decision on top
         tech = t["recipients"].get("technician", {})
         reason_key = "reason_rejected" if t["esc_reason"] == "rejected" else "reason_no_ack"
         reason = texts.LANGS[lang][reason_key].format(n=t["esc_detail"] or "")
-        text = (texts.voice_text(lang, "escalation", t, name=tech.get("name", ""), reason=reason) + " "
-                + texts.LANGS[lang]["escalation_confirm"].format(ack=t["ack_digit"]))
-        if c["outcome"] != "confirmed":
+        text = (texts.voice_text(lang, "escalation", t, name=tech.get("name", ""), reason=reason,
+                                 greet=texts.greeting(lang, c["recipient_name"])) + " "
+                + texts.LANGS[lang]["escalation_question"].format(ack=t["ack_digit"], rej=t["reject_digit"]))
+        if c["outcome"] not in ("reassign_yes", "reassign_no"):
             update_call(cid, outcome="reached")
         gather = (f'<Gather input="dtmf" numDigits="1" timeout="8" method="POST" '
                   f'action="/twilio/gather?cid={cid}&amp;r={retry}">{texts.say(lang, text)}</Gather>')
@@ -570,9 +579,10 @@ def twiml_gather(cid, retry, digits):
         update_call(cid, dtmf=",".join(x for x in (c["dtmf"], digits) if x))
         audit(c["ticket_id"], "dtmf", f"{c['role']} pressed '{digits}'", call_id=cid)
         if c["workflow"] == "uc1_escalation":
-            if digits == t["ack_digit"]:
-                update_call(cid, outcome="confirmed", ack_result="valid")
-                return _twiml(texts.say(lang, texts.LANGS[lang]["confirmed"]) + "<Hangup/>")
+            if digits in (t["ack_digit"], t["reject_digit"]):
+                decision = "reassign_yes" if digits == t["ack_digit"] else "reassign_no"
+                update_call(cid, outcome=decision, ack_result="valid")
+                return _twiml(texts.say(lang, texts.LANGS[lang][decision]) + "<Hangup/>")
             update_call(cid, ack_result="invalid")
             if retry == 0:
                 return _twiml(texts.say(lang, texts.LANGS[lang]["invalid"]) +
@@ -639,7 +649,7 @@ def finish_call(cid):
         if c["workflow"] == "uc1_technician":
             _after_technician_call(t, c, outcome)
         elif c["workflow"] == "uc1_escalation":
-            _after_escalation_call(t, c, picked)
+            _after_escalation_call(t, c, outcome)
         elif c["workflow"] == "uc1_reminder":
             update_ticket(tid, followup_state="REMINDER_CALLED")
             notify(tid, "uc1.reminder_called", {"outcome": outcome})
@@ -660,11 +670,13 @@ def _after_technician_call(t, c, outcome):
         _escalate(t, "no_acknowledgement", n)
 
 
-def _after_escalation_call(t, c, picked):
+def _after_escalation_call(t, c, outcome):
+    """Only an answer to the reassign question (1 or 9) ends the escalation. Picking up without a key
+    counts as no response: the next attempt or the next person is called."""
     tid, n, role = t["ticket_id"], c["attempt_no"], c["role"]
     if t["uc1_state"] != "ESCALATING":
         return
-    if picked:
+    if outcome in ("reassign_yes", "reassign_no"):
         _finish_uc1(tid, "TL_REACHED" if role == "team_leader" else "MANAGER_REACHED")
         return
     has_manager = bool(t["recipients"].get("manager", {}).get("mobile"))
@@ -714,11 +726,16 @@ def ticket_view(tid):
         esc_calls = [c for c in current if c["workflow"] == "uc1_escalation" and c["outcome"]]
         reached = lambda role: (any(c["picked_up"] for c in esc_calls if c["role"] == role)  # noqa: E731
                                 if any(c["role"] == role for c in esc_calls) else None)
-        confirmed = lambda role: (any(c["outcome"] == "confirmed" for c in esc_calls if c["role"] == role)  # noqa: E731
-                                  if any(c["role"] == role for c in esc_calls) else None)
+        decisions = {"reassign_yes": "assign_to_another_technician", "reassign_no": "do_not_reassign"}
+
+        def decision(role):
+            answered = [c["outcome"] for c in esc_calls if c["role"] == role and c["outcome"] in decisions]
+            return decisions[answered[-1]] if answered else None
+
         esc = {"reason": t["esc_reason"], "technician_calls": int(t["esc_detail"] or 0),
-               "team_leader_reached": reached("team_leader"), "team_leader_confirmed": confirmed("team_leader"),
-               "manager_reached": reached("manager"), "manager_confirmed": confirmed("manager")}
+               "team_leader_reached": reached("team_leader"), "team_leader_decision": decision("team_leader"),
+               "manager_reached": reached("manager"), "manager_decision": decision("manager")}
+        esc["reassign"] = esc["team_leader_decision"] or esc["manager_decision"]
     timers = q("SELECT kind, attempt_no, status, note, run_at FROM jobs WHERE ticket_id=? "
                "AND status IN ('pending','held','running') ORDER BY run_at", (tid,))
     for j in timers:
@@ -788,6 +805,27 @@ def wait_for_result(tid, assignment_id, until="technician", timeout=300):
         "technician_response": view["call_workflow"]["technician_response"],
         "response_summary": view["call_workflow"]["response_summary"],
         "ticket": view,
+    }
+
+
+def wait_for_call(cid, timeout=120):
+    """Block until one call has ended (used by the follow-up API's ?wait=true)."""
+    timeout = max(1, min(int(timeout), MAX_WAIT_SEC))
+    start = time.time()
+    while not get_call(cid)["processed"] and time.time() - start < timeout:
+        time.sleep(0.5)
+    c = get_call(cid)
+    done = bool(c["processed"])
+    view = _call_view(c)
+    t = get_ticket(c["ticket_id"])
+    return {
+        "reminder_result": c["outcome"] if done else "pending",
+        "answered": view["picked_up"] if done else None,
+        "response": view["response"],
+        "timed_out": not done,
+        "waited_sec": round(time.time() - start, 1),
+        "followup": {"state": t["followup_state"], "due_at": t["followup_due_at"]},
+        "call": view,
     }
 
 

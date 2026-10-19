@@ -27,7 +27,9 @@ from config import CFG
 # --------------------------------------------------------------------------- legacy single-call API (/api/call)
 def legacy_call(form):
     """POST /api/call {alert_id, ticket_id, phone_number, site_details, team_leader_number?, manager_number?,
-    callback_url?, language?, description?, ack_digit?} -> mapped onto an ASSIGNMENT_CREATED event."""
+    language?, technician_language?, team_leader_language?, manager_language?, technician_name?,
+    team_leader_name?, manager_name?, callback_url?, description?, ack_digit?} -> mapped onto an ASSIGNMENT_CREATED event. language is the default for everyone; the
+    per-person *_language fields override it (en, ar, ur, hi, or ask = menu)."""
     missing = [k for k in ("alert_id", "ticket_id", "phone_number", "site_details") if not str(form.get(k) or "").strip()]
     if missing:
         raise workflow.EventError(f"missing required field(s): {', '.join(missing)}")
@@ -36,11 +38,14 @@ def legacy_call(form):
     if t and t["uc1_state"] in workflow.ACTIVE:
         return 409, {"error": f"{tid} is already in progress ({t['uc1_state']}) - duplicate ignored"}
     stamp = int(time.time() * 1000)
-    language = form.get("language") or "ask"
-    recipients = [{"role": "technician", "mobile": str(form["phone_number"]).strip(), "language": language}]
+    default_language = form.get("language") or "ask"  # per-person *_language overrides it
+    recipients = [{"role": "technician", "mobile": str(form["phone_number"]).strip(),
+                   "name": form.get("technician_name") or "",
+                   "language": form.get("technician_language") or default_language}]
     for role, key in (("team_leader", "team_leader_number"), ("manager", "manager_number")):
         if str(form.get(key) or "").strip():
-            recipients.append({"role": role, "mobile": str(form[key]).strip(), "language": language})
+            recipients.append({"role": role, "mobile": str(form[key]).strip(), "name": form.get(f"{role}_name") or "",
+                               "language": form.get(f"{role}_language") or default_language})
     event = {
         "event_id": f"CALL-{tid}-{stamp}", "event_type": "ASSIGNMENT_CREATED",
         "ticket": {"ticket_id": tid, "alarm_id": form["alert_id"], "assignment_id": f"{tid}-A{stamp}",
@@ -116,17 +121,24 @@ def _wants_wait(params):
     return str(params.get("wait", "")).lower() in ("1", "true", "yes")
 
 
-def _wait(tid, assignment_id, params, accepted_body):
-    """?wait=true[&until=technician|final][&timeout=seconds]: hold the request until the answer is known.
-    200 = decided; 202 = still running when the timeout ran out (call_result 'pending')."""
+def _wait_options(params, default_timeout=300):
+    """?wait=true[&until=technician|final][&timeout=seconds] -> (until, timeout). Validated before waiting."""
     until = "final" if str(params.get("until", "")).lower() == "final" else "technician"
     try:
-        timeout = int(params.get("timeout", 300))
+        return until, int(params.get("timeout", default_timeout))
     except ValueError:
         raise workflow.EventError("timeout must be a number of seconds") from None
+
+
+def _wait(tid, assignment_id, options, accepted_body):
+    """Hold until the answer is known. call_result 'pending' + timed_out true = still running at the timeout."""
+    until, timeout = options
     waited = workflow.wait_for_result(tid, assignment_id, until, timeout)
-    body = dict(accepted_body, **waited)
-    return (202 if waited["timed_out"] else 200), body
+    return dict(accepted_body, **waited)
+
+
+KEEPALIVE_SEC = 10  # a space is sent this often while waiting (proxies drop silent requests: Cloudflare ~100 s)
+CLIENT_GONE = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -136,13 +148,57 @@ TICKET_PATH = re.compile(r"^/api/tickets/([^/]+)(/timeline|/followup)?$")
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="text/html; charset=utf-8", extra=None):
         data = body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        for k, v in (extra or {}).items():
-            self.send_header(k, v)
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(data)
+        except CLIENT_GONE:
+            self._client_gone()
+
+    def _client_gone(self, waited=None, ticket_id=None):
+        took = f" after {waited} s" if waited is not None else ""
+        where = f"; the result is saved - read it with GET /api/call/{ticket_id}" if ticket_id else ""
+        store.audit(ticket_id, "client_disconnected", f"Caller closed the connection{took} before the response "
+                    f"was sent ({self.command} {self.path}){where}")
+        self.close_connection = True
+
+    def _json_waiting(self, ticket_id, compute):
+        """Answer a ?wait=true request. Headers go out at once and a space every KEEPALIVE_SEC, so Cloudflare
+        and clients keep the connection open however long the calls take; the JSON follows when ready
+        (leading spaces are valid JSON). The HTTP status is 200; timed_out / call_result tell the outcome."""
+        box = {}
+
+        def run():
+            try:
+                box["body"] = compute()
+            except Exception as e:  # noqa: BLE001
+                box["body"] = {"error": f"{type(e).__name__}: {e}"}
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        started = time.time()
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+            while worker.is_alive():
+                worker.join(KEEPALIVE_SEC)
+                if worker.is_alive():
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+            self.wfile.write(json.dumps(box["body"], indent=2, ensure_ascii=False).encode("utf-8"))
+            self.wfile.flush()
+        except CLIENT_GONE:
+            self._client_gone(int(time.time() - started), ticket_id)
 
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, indent=2, ensure_ascii=False), "application/json; charset=utf-8")
@@ -233,22 +289,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "body is not valid JSON"})
         try:
             if path == "/api/events":
+                wants = _wants_wait(params) and str(form.get("event_type", "")).upper() in (
+                    "ASSIGNMENT_CREATED", "REASSIGNED")
+                options = _wait_options(params) if wants else None
                 code, body = workflow.ingest_event(form)
-                if code == 202 and _wants_wait(params) and form.get("event_type", "").upper() in (
-                        "ASSIGNMENT_CREATED", "REASSIGNED"):
-                    code, body = _wait(body["ticket_id"], body["ticket"]["assignment_id"], params, body)
+                if code == 202 and wants:
+                    tid, aid = body["ticket_id"], body["ticket"]["assignment_id"]
+                    return self._json_waiting(tid, lambda: _wait(tid, aid, options, body))
                 return self._json(code, body)
             m = TICKET_PATH.match(path)
             if m and m.group(2) == "/followup":
+                options = _wait_options(params, 120) if _wants_wait(params) else None
                 code, body = workflow.trigger_followup(urllib.parse.unquote(m.group(1)).upper(),
                                                        form.get("assignment_id") if isinstance(form, dict) else None)
+                if code == 202 and options:
+                    return self._json_waiting(body["ticket_id"], lambda: dict(
+                        body, **workflow.wait_for_call(body["call_id"], options[1])))
                 return self._json(code, body)
             if path == "/api/call":
+                options = _wait_options(params) if _wants_wait(params) else None
                 code, body = legacy_call(form)
-                if code == 202 and _wants_wait(params):
-                    code, waited = _wait(body["ticket_id"], body["assignment_id"], params, {})
-                    body = dict(legacy_view(body["ticket_id"]), **{k: v for k, v in waited.items() if k != "ticket"},
-                                status_url=body["status_url"])
+                if code == 202 and options:
+                    tid, aid, status_url = body["ticket_id"], body["assignment_id"], body["status_url"]
+
+                    def compute():
+                        waited = _wait(tid, aid, options, {})
+                        return dict(legacy_view(tid), **{k: v for k, v in waited.items() if k != "ticket"},
+                                    status_url=status_url)
+                    return self._json_waiting(tid, compute)
                 return self._json(code, body)
             if path == "/trigger":
                 legacy_call(form)

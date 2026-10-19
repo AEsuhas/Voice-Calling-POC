@@ -3,6 +3,7 @@ Sample webhook receiver - stands in for the system that wants the call results
 (e.g. an AutomationEdge workflow webhook).
 
     python callback_receiver.py            # listens on http://localhost:5058/visit-result
+    python callback_receiver.py --tunnel   # same, plus a public Cloudflare URL (start_callback.bat)
 
 Send it as callback_url in POST /api/call:
     "callback_url": "http://localhost:5058/visit-result"
@@ -14,12 +15,18 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 5058
+ARGS = [a for a in sys.argv[1:] if a != "--tunnel"]
+TUNNEL = "--tunnel" in sys.argv[1:]
+PORT = int(ARGS[0]) if ARGS else 5058
 
 
 def api_key():
@@ -52,7 +59,23 @@ class Receiver(BaseHTTPRequestHandler):
         pass
 
 
+def start_cloudflared(port):
+    proc = subprocess.Popen(["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
+                            stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True)
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", proc.stderr.readline() or "")
+        if m:
+            threading.Thread(target=lambda: [None for _ in proc.stderr], daemon=True).start()
+            return m.group(0)
+    raise RuntimeError("cloudflared did not return a public URL")
+
+
 if __name__ == "__main__":
+    server = HTTPServer(("127.0.0.1", PORT), Receiver)
     print(f"Callback receiver on http://localhost:{PORT}/visit-result  (results -> callback_results.jsonl)",
           flush=True)
-    HTTPServer(("127.0.0.1", PORT), Receiver).serve_forever()
+    if TUNNEL:
+        print("Starting cloudflared tunnel for the callback...", flush=True)
+        print(f"Public callback URL: {start_cloudflared(PORT)}/visit-result", flush=True)
+    server.serve_forever()
